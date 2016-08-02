@@ -1,0 +1,253 @@
+#ifdef HAVE_CONFIG_H
+# include "config.h"
+#endif
+
+#include <stdio.h>
+#if !defined WIN32 && !defined _WIN32
+#include <unistd.h>
+#endif
+#ifdef HAVE_GETOPT_H
+#include <getopt.h>
+#endif
+#ifndef HAVE_GETOPT_LONG
+#include "getopt_win.h"
+#endif
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include <speex/speex.h>
+#include <ogg/ogg.h>
+#include "wav_io.h"
+#include <speex/speex_header.h>
+#include <speex/speex_stereo.h>
+#include <speex/speex_preprocess.h>
+
+#if defined WIN32 || defined _WIN32
+/* We need the following two to set stdout to binary */
+#include <io.h>
+#include <fcntl.h>
+#endif
+
+int main()
+{
+   	int lsb=1;
+   	SpeexHeader header;
+   	int nb_samples, total_samples=0, nb_encoded;
+   	int wave_input=0;
+	ogg_stream_state os;
+	ogg_stream_state so; /* ogg stream for skeleton bitstream */
+
+	SpeexBits bits;
+	ogg_page og;
+	ogg_packet op;
+	const SpeexMode *mode= &speex_nb_mode;
+	spx_int32_t vbr_enabled=0;
+	spx_int32_t vbr_max=0;
+	int abr_enabled=0;
+	spx_int32_t vad_enabled=0;
+	spx_int32_t dtx_enabled=0;
+
+	spx_int32_t quality= 8;
+	spx_int32_t bitrate=16;
+	int rate = 16000;
+	int complexity = 4;
+	spx_int32_t frame_size;
+	int ret;
+	int nbBytes;
+	int chan = 1;
+   	int fmt=16;
+	spx_int32_t size;
+
+	char *inFile = "1.wav";
+	char *outFile = "1.ogg";
+	char first_bytes[12];
+	FILE *fin;
+	FILE *fout;
+	fin = fopen(inFile, "rb");
+	if (!fin) {
+		perror(inFile);
+		exit(1);
+	}
+
+	fread(first_bytes, 1, 12, fin);
+	if (strncmp(first_bytes,"RIFF",4)==0 && strncmp(first_bytes,"RIFF",4) == 0) {
+		if (read_wav_header(fin, &rate, &chan, &fmt, &size)==-1)
+			exit(1);
+		wave_input=1;
+		lsb=1; /* CHECK: exists big-endian .wav ?? */
+	}
+
+	speex_init_header(&header, rate, 1, mode);
+	header.frames_per_packet=10;
+	header.vbr=0;
+	header.nb_channels = 1;
+	printf("speexenc\n");
+	nb_encoder_init(mode);
+
+	speex_encoder_ctl(st, SPEEX_GET_FRAME_SIZE, &frame_size);
+	speex_encoder_ctl(st, SPEEX_SET_COMPLEXITY, &complexity);
+	speex_encoder_ctl(st, SPEEX_SET_SAMPLING_RATE, &rate);
+	speex_encoder_ctl(st, SPEEX_SET_QUALITY, &quality);
+	speex_encoder_ctl(st, SPEEX_SET_BITRATE, &bitrate);
+	fout = fopen(outFile, "wb");
+	if (!fout) {
+		perror(outFile);
+		exit(1);
+	}
+
+	int result;
+	/*Write header*/
+	{
+		int packet_size;
+		op.packet = (unsigned char *)speex_header_to_packet(&header, &packet_size);
+		op.bytes = packet_size;
+		op.b_o_s = 1;
+		op.e_o_s = 0;
+		op.granulepos = 0;
+		op.packetno = 0;
+		ogg_stream_packetin(&os, &op);
+		free(op.packet);
+		while ((result = ogg_stream_flush(&os, &og))) {
+			if (!result) break;
+			ret = oe_write_page(&og, fout);
+			if (ret != og.header_len + og.body_len) {
+				fprintf (stderr,"Error: failed writing header to output stream\n");
+				exit(1);
+			} else {
+				bytes_written += ret;
+			}
+		}
+	}
+	/* writing the rest of the speex header packets */
+	while ((result = ogg_stream_flush(&os, &og))) {
+		if (!result) break;
+		ret = oe_write_page(&og, fout);
+		if (ret != og.header_len + og.body_len) {
+			fprintf (stderr,"Error: failed writing header to output stream\n");
+			exit(1);
+		} else {
+			bytes_written += ret;
+		}
+	}
+
+	speex_bits_init(&bits);
+
+	if (!wave_input)
+	{
+		nb_samples = read_samples(fin,frame_size,fmt,chan,lsb,input, first_bytes, NULL);
+	} else {
+		nb_samples = read_samples(fin,frame_size,fmt,chan,lsb,input, NULL, &size);
+	}
+	if (nb_samples==0)
+		eos=1;
+	total_samples += nb_samples;
+	nb_encoded = -lookahead;
+	/*Main encoding loop (one frame per iteration)*/
+	while (!eos || total_samples>nb_encoded)
+	{
+		id++;
+
+		speex_encode_int(st, input, &bits);
+
+		nb_encoded += frame_size;
+		if (print_bitrate) {
+			int tmp;
+			char ch=13;
+			speex_encoder_ctl(st, SPEEX_GET_BITRATE, &tmp);
+			fputc (ch, stderr);
+			cumul_bits += tmp;
+			enc_frames += 1;
+
+		}
+
+		if (wave_input) {
+			nb_samples = read_samples(fin,frame_size,fmt,chan,lsb,input, NULL, &size);
+		} else {
+			nb_samples = read_samples(fin,frame_size,fmt,chan,lsb,input, NULL, NULL);
+		}
+		if (nb_samples==0) {
+			eos=1;
+		}
+		if (eos && total_samples<=nb_encoded)
+			op.e_o_s = 1;
+		else
+			op.e_o_s = 0;
+		total_samples += nb_samples;
+
+		if ((id+1)%nframes!=0)
+			continue;
+		speex_bits_insert_terminator(&bits);
+		nbBytes = speex_bits_write(&bits, cbits, MAX_FRAME_BYTES);
+		speex_bits_reset(&bits);
+		op.packet = (unsigned char *)cbits;
+		op.bytes = nbBytes;
+		op.b_o_s = 0;
+		/*Is this redundent?*/
+		if (eos && total_samples<=nb_encoded)
+			op.e_o_s = 1;
+		else
+			op.e_o_s = 0;
+		op.granulepos = (id+1)*frame_size-lookahead;
+		if (op.granulepos>total_samples)
+			op.granulepos = total_samples;
+		/*printf ("granulepos: %d %d %d %d %d %d\n", (int)op.granulepos, id, nframes, lookahead, 5, 6);*/
+		op.packetno = 2+id/nframes;
+		ogg_stream_packetin(&os, &op);
+
+		/*Write all new pages (most likely 0 or 1)*/
+		while (ogg_stream_pageout(&os,&og))
+		{
+			ret = oe_write_page(&og, fout);
+			if(ret != og.header_len + og.body_len)
+			{
+				fprintf (stderr,"Error: failed writing header to output stream\n");
+				exit(1);
+			}
+			else
+				bytes_written += ret;
+		}
+	}
+	if ((id+1)%nframes!=0)
+	{
+		while ((id+1)%nframes!=0)
+		{
+			id++;
+			speex_bits_pack(&bits, 15, 5);
+		}
+		nbBytes = speex_bits_write(&bits, cbits, MAX_FRAME_BYTES);
+		op.packet = (unsigned char *)cbits;
+		op.bytes = nbBytes;
+		op.b_o_s = 0;
+		op.e_o_s = 1;
+		op.granulepos = (id+1)*frame_size-lookahead;
+		if (op.granulepos>total_samples)
+			op.granulepos = total_samples;
+
+		op.packetno = 2+id/nframes;
+		ogg_stream_packetin(&os, &op);
+	}
+	/*Flush all pages left to be written*/
+	while (ogg_stream_flush(&os, &og))
+	{
+		ret = oe_write_page(&og, fout);
+		if(ret != og.header_len + og.body_len)
+		{
+			fprintf (stderr,"Error: failed writing header to output stream\n");
+			exit(1);
+		}
+		else
+			bytes_written += ret;
+	}
+
+	speex_encoder_destroy(st);
+	speex_bits_destroy(&bits);
+	ogg_stream_clear(&os);
+
+	if (close_in)
+		fclose(fin);
+	if (close_out)
+		fclose(fout);
+
+	return 0;
+}
